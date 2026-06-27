@@ -273,10 +273,10 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
 
   // Model fallback chain — if one is quota-exhausted, the next one is tried
   const MODELS = [
-    "gemini-2.0-flash-lite",   // highest free RPD limit, try first
-    "gemini-2.0-flash",        // standard free tier
-    "gemini-1.5-flash-8b",     // small fast model, very high free limits
-    "gemini-1.5-pro",          // fallback
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-1.5-pro",
   ];
 
   const requestBody = JSON.stringify({
@@ -290,14 +290,12 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  let lastStatus = null;
-  let lastBody = null;
+  // Track what each model returned so we can report it
+  const modelResults = [];
 
   for (let m = 0; m < MODELS.length; m++) {
     const model = MODELS[m];
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
-
-    console.log(`Trying model: ${model}`);
 
     try {
       const geminiRes = await fetch(url, {
@@ -306,37 +304,50 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
         body: requestBody,
       });
 
-      // Rate limited or quota exhausted — try next model
-      if (geminiRes.status === 429 || geminiRes.status === 403) {
-        console.log(`Model ${model} returned ${geminiRes.status} — trying next model`);
-        lastStatus = geminiRes.status;
-        if (m < MODELS.length - 1) {
-          await sleep(1000); // brief pause before trying next model
-          continue;
-        }
-        // All models exhausted
+      // Log what each model returned
+      modelResults.push({ model, status: geminiRes.status });
+
+      // 401 = bad API key — no point trying other models
+      if (geminiRes.status === 401) {
+        const errText = await geminiRes.text();
         return {
-          statusCode: 429,
+          statusCode: 401,
           headers,
           body: JSON.stringify({
-            error: "All AI models are currently rate limited. Your free daily quota may be exhausted. Please try again tomorrow, or wait a few minutes and retry.",
+            error: "Invalid API key. Check that GEMINI_API_KEY in your Netlify environment variables is correct and matches what you see in aistudio.google.com.",
+            details: errText,
           }),
         };
       }
 
-      // Model not found — try next
+      // 429 or 403 = rate limited / quota exhausted — try next model
+      if (geminiRes.status === 429 || geminiRes.status === 403) {
+        if (m < MODELS.length - 1) { await sleep(500); continue; }
+        return {
+          statusCode: 429,
+          headers,
+          body: JSON.stringify({
+            error: "All AI models are quota-exhausted for today. The free tier resets at midnight Pacific Time. Try again tomorrow.",
+            modelResults,
+          }),
+        };
+      }
+
+      // 404 = model not available — try next
       if (geminiRes.status === 404) {
-        console.log(`Model ${model} not found (404) — trying next model`);
-        continue;
+        if (m < MODELS.length - 1) { continue; }
       }
 
       // Other non-OK responses
       if (!geminiRes.ok) {
         const errText = await geminiRes.text();
-        lastBody = errText;
-        lastStatus = geminiRes.status;
-        console.log(`Model ${model} error ${geminiRes.status}: ${errText}`);
-        continue;
+        modelResults[modelResults.length - 1].error = errText.slice(0, 200);
+        if (m < MODELS.length - 1) { await sleep(300); continue; }
+        return {
+          statusCode: 502,
+          headers,
+          body: JSON.stringify({ error: "All models returned errors.", modelResults }),
+        };
       }
 
       // ── SUCCESS ──
@@ -344,11 +355,14 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
       const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
 
       if (!rawText) {
-        console.log(`Model ${model} returned empty response — trying next`);
-        continue;
+        if (m < MODELS.length - 1) { continue; }
+        return {
+          statusCode: 502,
+          headers,
+          body: JSON.stringify({ error: "Empty response from all models.", modelResults }),
+        };
       }
 
-      // Strip markdown code fences Gemini sometimes adds
       const cleanText = rawText
         .replace(/```json\s*/gi, "")
         .replace(/```\s*/g, "")
@@ -361,34 +375,24 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
         return {
           statusCode: 502,
           headers,
-          body: JSON.stringify({
-            error: "Failed to parse AI response as JSON",
-            raw: cleanText.slice(0, 500),
-          }),
+          body: JSON.stringify({ error: "Failed to parse AI response as JSON", raw: cleanText.slice(0, 500) }),
         };
       }
 
-      console.log(`Success with model: ${model}`);
       return { statusCode: 200, headers, body: JSON.stringify(parsed) };
 
     } catch (err) {
-      console.log(`Model ${model} threw: ${err.message}`);
-      lastBody = err.message;
-      if (m < MODELS.length - 1) {
-        await sleep(500);
-        continue;
-      }
+      modelResults.push({ model, status: "network_error", error: err.message });
+      if (m < MODELS.length - 1) { await sleep(300); continue; }
     }
   }
 
-  // Every model failed
   return {
     statusCode: 502,
     headers,
     body: JSON.stringify({
       error: "All AI models failed to respond.",
-      lastStatus: lastStatus,
-      details: lastBody,
+      modelResults,
     }),
   };
 };
