@@ -268,68 +268,114 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
   }
 
   // ============================================================
-  // CALL GEMINI API
+  // CALL GEMINI API — with automatic retry on 429 rate limit
   // ============================================================
-  try {
-    const geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
+  const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+  const requestBody = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.85,
+      maxOutputTokens: 2048,
+      topP: 0.9,
+    },
+  });
+
+  // Helper: sleep for ms milliseconds
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Retry up to 3 times with exponential backoff: 3s, 6s, 12s
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 3000;
+
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const geminiRes = await fetch(GEMINI_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.85,
-            maxOutputTokens: 2048,
-            topP: 0.9,
-          },
-        }),
+        body: requestBody,
+      });
+
+      // Rate limited — wait and retry
+      if (geminiRes.status === 429) {
+        const waitMs = BASE_DELAY_MS * attempt; // 3s, 6s, 9s
+        console.log(`Rate limited (429). Attempt ${attempt}/${MAX_RETRIES}. Waiting ${waitMs}ms...`);
+        if (attempt < MAX_RETRIES) {
+          await sleep(waitMs);
+          continue;
+        } else {
+          return {
+            statusCode: 429,
+            headers,
+            body: JSON.stringify({
+              error: "The AI is receiving too many requests right now. Please wait 15 seconds and try again.",
+            }),
+          };
+        }
       }
-    );
 
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
-      return {
-        statusCode: 502,
-        headers,
-        body: JSON.stringify({ error: `Gemini API error: ${geminiRes.status}`, details: errText }),
-      };
+      // Other HTTP errors
+      if (!geminiRes.ok) {
+        const errText = await geminiRes.text();
+        return {
+          statusCode: 502,
+          headers,
+          body: JSON.stringify({
+            error: `Gemini API error: ${geminiRes.status}`,
+            details: errText,
+          }),
+        };
+      }
+
+      // Success — parse the response
+      const geminiData = await geminiRes.json();
+      const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!rawText) {
+        return {
+          statusCode: 502,
+          headers,
+          body: JSON.stringify({ error: "Empty response from Gemini", raw: geminiData }),
+        };
+      }
+
+      // Strip any markdown code fences Gemini might add
+      const cleanText = rawText
+        .replace(/```json\s*/gi, "")
+        .replace(/```\s*/g, "")
+        .trim();
+
+      let parsed;
+      try {
+        parsed = JSON.parse(cleanText);
+      } catch (parseErr) {
+        return {
+          statusCode: 502,
+          headers,
+          body: JSON.stringify({ error: "Failed to parse Gemini JSON response", raw: cleanText }),
+        };
+      }
+
+      return { statusCode: 200, headers, body: JSON.stringify(parsed) };
+
+    } catch (err) {
+      lastError = err;
+      console.log(`Attempt ${attempt} threw an error: ${err.message}`);
+      if (attempt < MAX_RETRIES) {
+        await sleep(BASE_DELAY_MS * attempt);
+      }
     }
-
-    const geminiData = await geminiRes.json();
-    const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!rawText) {
-      return {
-        statusCode: 502,
-        headers,
-        body: JSON.stringify({ error: "Empty response from Gemini", raw: geminiData }),
-      };
-    }
-
-    // Strip any markdown code fences Gemini might add
-    const cleanText = rawText
-      .replace(/```json\s*/gi, "")
-      .replace(/```\s*/g, "")
-      .trim();
-
-    let parsed;
-    try {
-      parsed = JSON.parse(cleanText);
-    } catch (parseErr) {
-      return {
-        statusCode: 502,
-        headers,
-        body: JSON.stringify({ error: "Failed to parse Gemini JSON response", raw: cleanText }),
-      };
-    }
-
-    return { statusCode: 200, headers, body: JSON.stringify(parsed) };
-  } catch (err) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: "Internal server error", message: err.message }),
-    };
   }
+
+  // All retries exhausted
+  return {
+    statusCode: 500,
+    headers,
+    body: JSON.stringify({
+      error: "Internal server error after multiple retries",
+      message: lastError ? lastError.message : "Unknown error",
+    }),
+  };
 };
