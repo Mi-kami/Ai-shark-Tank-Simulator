@@ -1011,6 +1011,7 @@
       body: body
     }).then(function(res) {
       return res.json().then(function(data) {
+        if (res.status === 429) throw new Error('The AI is a bit overwhelmed right now. Wait 15 seconds and try again.');
         if (!res.ok || data.error) throw new Error(data.error || 'Server error ' + res.status);
         return data;
       });
