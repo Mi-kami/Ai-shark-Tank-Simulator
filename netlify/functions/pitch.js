@@ -271,12 +271,13 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
   // CALL GEMINI API — tries multiple models, falls back if rate limited
   // ============================================================
 
-  // Model fallback chain — if one is quota-exhausted, the next one is tried
+  // Model fallback chain — current models as of June 2026
+  // gemini-2.0-x models retired June 1 2026, using 2.5+ only
   const MODELS = [
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash-8b",
-    "gemini-1.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
   ];
 
   const requestBody = JSON.stringify({
@@ -289,22 +290,23 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
   });
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  // Track what each model returned so we can report it
   const modelResults = [];
 
   for (let m = 0; m < MODELS.length; m++) {
     const model = MODELS[m];
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+    // AQ. auth keys require x-goog-api-key header (not ?key= query param)
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
     try {
       const geminiRes = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": GEMINI_API_KEY,
+        },
         body: requestBody,
       });
 
-      // Log what each model returned
       modelResults.push({ model, status: geminiRes.status });
 
       // 401 = bad API key — no point trying other models
@@ -314,20 +316,20 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
           statusCode: 401,
           headers,
           body: JSON.stringify({
-            error: "Invalid API key. Check that GEMINI_API_KEY in your Netlify environment variables is correct and matches what you see in aistudio.google.com.",
+            error: "Invalid API key (401). Go to Netlify → Site configuration → Environment Variables and confirm GEMINI_API_KEY is set correctly with no extra spaces.",
             details: errText,
           }),
         };
       }
 
-      // 429 or 403 = rate limited / quota exhausted — try next model
+      // 429 or 403 = quota exhausted — try next model
       if (geminiRes.status === 429 || geminiRes.status === 403) {
         if (m < MODELS.length - 1) { await sleep(500); continue; }
         return {
           statusCode: 429,
           headers,
           body: JSON.stringify({
-            error: "All AI models are quota-exhausted for today. The free tier resets at midnight Pacific Time. Try again tomorrow.",
+            error: "All AI models are quota-exhausted. The free tier resets at midnight Pacific Time. Try again later.",
             modelResults,
           }),
         };
@@ -338,10 +340,10 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
         if (m < MODELS.length - 1) { continue; }
       }
 
-      // Other non-OK responses
+      // Other non-OK
       if (!geminiRes.ok) {
         const errText = await geminiRes.text();
-        modelResults[modelResults.length - 1].error = errText.slice(0, 200);
+        modelResults[modelResults.length - 1].error = errText.slice(0, 300);
         if (m < MODELS.length - 1) { await sleep(300); continue; }
         return {
           statusCode: 502,
@@ -390,9 +392,6 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
   return {
     statusCode: 502,
     headers,
-    body: JSON.stringify({
-      error: "All AI models failed to respond.",
-      modelResults,
-    }),
+    body: JSON.stringify({ error: "All AI models failed.", modelResults }),
   };
 };
