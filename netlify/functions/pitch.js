@@ -55,6 +55,8 @@ exports.handler = async (event) => {
   if (action === "generate_questions") {
     prompt = `You are the AI engine powering a Shark Tank investment simulation. A founder just walked into the tank with their startup pitch. Your job is to generate sharp, specific, challenging questions from 4 distinct investor judges.
 
+CRITICAL: Your entire response must be a single valid JSON object. No preamble, no explanation, no markdown, no text before or after the JSON. Start your response with { and end with }.
+
 STARTUP PITCH:
 - Startup Name: ${pitch.name}
 - Problem Being Solved: ${pitch.problem}
@@ -123,6 +125,8 @@ Return ONLY valid JSON. No markdown. No explanation. No text before or after. Ju
 
     prompt = `You are evaluating a startup pitch in a Shark Tank simulation. Score the founder based on their pitch AND how well they answered the judges' questions.
 
+CRITICAL: Your entire response must be a single valid JSON object. No preamble, no explanation, no markdown, no text before or after the JSON. Start your response with { and end with }.
+
 ORIGINAL PITCH:
 - Startup: ${pitch.name}
 - Problem: ${pitch.problem}
@@ -185,6 +189,8 @@ For sentiment: use "positive", "neutral", or "negative" based on how impressed t
     const total = Object.values(scores).reduce((a, b) => a + b, 0);
 
     prompt = `You are delivering final investment verdicts in a Shark Tank simulation.
+
+CRITICAL: Your entire response must be a single valid JSON object. No preamble, no explanation, no markdown, no text before or after the JSON. Start your response with { and end with }.
 
 STARTUP: ${pitch.name}
 PITCH: Problem: "${pitch.problem}" | Solution: "${pitch.solution}" | Revenue: "${pitch.revenue}" | Ask: "${pitch.ask}"
@@ -284,7 +290,7 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: 0.85,
-      maxOutputTokens: 2048,
+      maxOutputTokens: 4096,
       topP: 0.9,
     },
   });
@@ -370,14 +376,26 @@ overallVerdict: "funded" if 2+ judges invest, "acquired" if anyone acquires, "mi
         .replace(/```\s*/g, "")
         .trim();
 
+      // Robustly extract JSON — find the outermost { ... } block
+      // This handles cases where Gemini adds explanation text before/after
+      let jsonString = cleanText;
+      const firstBrace = cleanText.indexOf('{');
+      const lastBrace  = cleanText.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        jsonString = cleanText.slice(firstBrace, lastBrace + 1);
+      }
+
       let parsed;
       try {
-        parsed = JSON.parse(cleanText);
+        parsed = JSON.parse(jsonString);
       } catch (parseErr) {
         return {
           statusCode: 502,
           headers,
-          body: JSON.stringify({ error: "Failed to parse AI response as JSON", raw: cleanText.slice(0, 500) }),
+          body: JSON.stringify({
+            error: "Failed to parse AI response as JSON",
+            raw: jsonString.slice(0, 500)
+          }),
         };
       }
 
